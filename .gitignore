@@ -1,0 +1,90 @@
+# =========================
+# Python
+# =========================
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv/
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Logs
+*.log
+
+# =========================
+# Environment variables
+# =========================
+.env
+.env.*
+*.env
+
+# =========================
+# Jupyter / notebooks
+# =========================
+.ipynb_checkpoints/
+
+# =========================
+# IDEs / Editors
+# =========================
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# =========================
+# OS files
+# =========================
+.DS_Store
+Thumbs.db
+
+# =========================
+# Streamlit
+# =========================
+.streamlit/
+
+# =========================
+# FastAPI / Backend
+# =========================
+*.db
+*.sqlite3
+
+# =========================
+# Redis / Celery
+# =========================
+celerybeat-schedule
+celerybeat.pid
+
+# =========================
+# Test / coverage
+# =========================
+.coverage
+htmlcov/
+.pytest_cache/
+
+# =========================
+# Data files (important!)
+# =========================
+data/
+*.csv
+*.parquet
+
+# =========================
+# Secrets / API keys
+# =========================
+secrets.json
+config.yaml
+
+# =========================
+# Misc
+# =========================
+*.bak
+*.tmp
