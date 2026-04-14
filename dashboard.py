@@ -1,22 +1,21 @@
 """
-dashboard.py  (v2)
-------------------
-Full live Streamlit dashboard — mirrors the layout in the screenshot:
-
-  Row 1 ── Live header bar  (NSE · timestamp)
-  Row 2 ── FII NET BUY · DII NET BUY · COMBINED NETFLOW · FII/DII RATIO  (metric tiles)
-  Row 3 ── Nifty 50 · Sensex · Bank Nifty · India VIX  (index strip)
-  Row 4 ── FII intraday netflow chart  |  DII intraday netflow chart
-  Row 5 ── FII activity breakdown table  |  DII activity breakdown table
-  Row 6 ── Sector-wise FII flow bar chart
-  Row 7 ── INSTITUTIONAL SIGNAL banner
-  ──────────────────────────────────────────────────────────────────────
-  Row 8 ── Price chart (candlestick + EMA20/50/200 + volume sub-plot)
-  Row 9 ── LONG signal card  |  SHORT signal card
-            Each card: confluence gauge · score-breakdown bars · full trade plan
-  Row 10 ── 22-Technique breakdown table (icon + note per technique)
-  Row 11 ── Options OI heatmap  |  Options metrics panel
-  Row 12 ── India VIX 3-month trend
+dashboard.py  (v3)
+──────────────────────────────────────────────────────────────────────────────
+Upgrades over v2:
+  • Dark / Light mode toggle (sidebar) — full palette swap via CSS variables
+  • Sortable tables — FII/DII breakdown, 22-technique table, options chain
+    (click any column header to sort ascending / descending)
+  • TradingView-style price chart:
+      - Dark background  (#131722)
+      - Watermark symbol name (bottom-right)
+      - RSI sub-plot (row 2, 14-period)
+      - MACD sub-plot (row 3)
+      - Volume bars (row 4, colour-matched to candle)
+      - Bollinger Bands overlay
+      - Support / Resistance horizontal lines
+      - Crosshair-style hover with unified tooltip
+      - Range selector buttons (1W · 1M · 3M · 6M · 1Y · All)
+      - Editable range slider at the bottom
 
 Run:
     streamlit run dashboard.py
@@ -33,453 +32,759 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
+import streamlit.components.v1 as components
 
 warnings.filterwarnings("ignore")
 
 from stock_advisor import (
-    compute_signal, SYMBOLS, download_ohlcv,
-    _ema, download_vix,
+    compute_signal, SYMBOLS, download_ohlcv, _ema, _rsi, _macd,
+    _atr, download_vix,
 )
 from fii_dii_feed import fetch_fiidii_data
 from options_feed import fetch_options_data
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Page config & global CSS
+# Page config
 # ─────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="Stock Advisor — Live BUY / SELL Dashboard",
+    page_title="Stock Advisor — Live Dashboard",
     page_icon="📈",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-st.markdown("""
-<style>
-[data-testid="stAppViewContainer"] { background: #0d0f14; color: #e8eaf0; }
-[data-testid="stSidebar"]          { background: #13161e; }
-
-.metric-tile {
-    background: #1a1d27;
-    border: 1px solid #2a2d3a;
-    border-radius: 10px;
-    padding: 14px 18px;
-    margin-bottom: 8px;
-    height: 100%;
-}
-.label  { font-size: 11px; color: #8a8fa8; text-transform: uppercase; letter-spacing: .06em; }
-.val-lg { font-size: 26px; font-weight: 700; line-height: 1.2; }
-.val-md { font-size: 18px; font-weight: 700; }
-.delta  { font-size: 12px; margin-top: 3px; }
-.green  { color: #00c853; }
-.red    { color: #ef5350; }
-.yellow { color: #ffab00; }
-.grey   { color: #78909c; }
-.white  { color: #e8eaf0; }
-
-.section-hdr {
-    font-size: 12px; font-weight: 700; text-transform: uppercase;
-    letter-spacing: .1em; color: #8a8fa8;
-    border-bottom: 1px solid #2a2d3a;
-    padding-bottom: 5px; margin: 18px 0 10px;
-}
-
-.bull-banner {
-    background: linear-gradient(90deg,#002d18,#003d20);
-    border: 1px solid #00c853; border-radius: 8px;
-    padding: 14px 22px; display:flex; justify-content:space-between;
-    align-items:center; margin: 8px 0 4px;
-}
-.bear-banner {
-    background: linear-gradient(90deg,#2d0000,#3d0000);
-    border: 1px solid #ef5350; border-radius: 8px;
-    padding: 14px 22px; display:flex; justify-content:space-between;
-    align-items:center; margin: 8px 0 4px;
-}
-.banner-label { font-size:14px; font-weight:800; letter-spacing:.1em; }
-.banner-value { font-size:22px; font-weight:800; }
-
-.trade-card {
-    background: #1a1d27; border: 1px solid #2a2d3a;
-    border-radius: 10px; padding: 14px; margin-top: 8px;
-}
-.trow {
-    display:flex; justify-content:space-between;
-    border-bottom:1px solid #1e2130; padding: 7px 2px; font-size:12px;
-}
-.trow:last-child { border-bottom: none; }
-.tkey  { color: #8a8fa8; }
-.tval  { font-weight: 600; text-align:right; max-width:60%; }
-
-.tech-table { width:100%; border-collapse:collapse; font-size:12px; }
-.tech-table th {
-    background:#13161e; color:#8a8fa8; text-align:left;
-    padding:7px 10px; font-size:11px; text-transform:uppercase; letter-spacing:.05em;
-    position:sticky; top:0;
-}
-.tech-table td { padding: 6px 10px; border-bottom:1px solid #1a1d27; vertical-align:middle; }
-.tech-table tr:hover td { background:#1e2130; }
-
-.act-table { width:100%; font-size:13px; border-collapse:collapse; }
-.act-table td { padding: 6px 0; border-bottom:1px solid #1e2130; }
-.act-table td:last-child { text-align:right; font-weight:600; }
-
-.opt-row {
-    display:flex; justify-content:space-between; align-items:flex-end;
-    border-bottom:1px solid #1e2130; padding:8px 2px;
-}
-.opt-row:last-child { border-bottom:none; }
-</style>
-""", unsafe_allow_html=True)
-
 # ─────────────────────────────────────────────────────────────────────────────
-# Sidebar
+# Sidebar  (theme toggle lives here)
 # ─────────────────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("### ⚙️ Settings")
-    symbol = st.selectbox("Symbol", ["NIFTY", "SENSEX", "BANKNIFTY"], index=0)
+    theme     = st.radio("🎨 Theme", ["Dark", "Light"], index=0, horizontal=True)
+    symbol    = st.selectbox("Symbol", ["NIFTY", "SENSEX", "BANKNIFTY"], index=0)
     direction = st.radio("Direction", ["BOTH", "LONG", "SHORT"], index=0)
     timeframe = st.selectbox("Chart timeframe", ["1d", "1h", "15m"], index=0)
-    refresh = st.slider("Auto-refresh (min)", 0, 30, 5)
-    st.button("🔄 Run Analysis", use_container_width=True)
+    refresh   = st.slider("Auto-refresh (min)", 0, 30, 5)
+    st.button("🔄 Refresh Now", use_container_width=True)
     st.markdown("---")
     st.caption("Data: yfinance · NSE India · FII/DII · Options")
     st.caption("⚠️ Educational only — not financial advice.")
 
+IS_DARK = (theme == "Dark")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Cached data helpers
+# Colour palette (dark / light)
+# ─────────────────────────────────────────────────────────────────────────────
+P = {
+    "bg":          "#0d0f14" if IS_DARK else "#f4f6fa",
+    "bg2":         "#1a1d27" if IS_DARK else "#ffffff",
+    "bg3":         "#13161e" if IS_DARK else "#eef0f6",
+    "border":      "#2a2d3a" if IS_DARK else "#dde1ec",
+    "text":        "#e8eaf0" if IS_DARK else "#1a1d27",
+    "text2":       "#8a8fa8" if IS_DARK else "#5a5f78",
+    "text3":       "#555970" if IS_DARK else "#9095b0",
+    "green":       "#00c853",
+    "red":         "#ef5350",
+    "yellow":      "#ffab00",
+    "blue":        "#42a5f5",
+    "purple":      "#ce93d8",
+    "orange":      "#ffa726",
+    "chart_bg":    "#131722" if IS_DARK else "#ffffff",
+    "chart_grid":  "#1e2230" if IS_DARK else "#e8edf5",
+    "chart_cross": "#758696" if IS_DARK else "#9ba8ba",
+    "up_candle":   "#26a69a",
+    "dn_candle":   "#ef5350",
+    "up_wick":     "#26a69a",
+    "dn_wick":     "#ef5350",
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Global CSS  (uses Python palette so it flips with theme)
+# ─────────────────────────────────────────────────────────────────────────────
+st.markdown(f"""
+<style>
+/* ── base ──────────────────────────────────────────────────── */
+[data-testid="stAppViewContainer"] {{
+    background: {P["bg"]}; color: {P["text"]};
+    transition: background .25s, color .25s;
+}}
+[data-testid="stSidebar"] {{
+    background: {P["bg3"]} !important; color: {P["text"]};
+}}
+[data-testid="stSidebar"] * {{ color: {P["text"]} !important; }}
+
+/* ── metric tile ─────────────────────────────────────────────── */
+.tile {{
+    background: {P["bg2"]}; border: 1px solid {P["border"]};
+    border-radius: 10px; padding: 14px 18px; margin-bottom: 8px;
+    transition: background .25s;
+}}
+.lbl  {{ font-size:11px; color:{P["text2"]}; text-transform:uppercase; letter-spacing:.06em; }}
+.vl   {{ font-size:26px; font-weight:700; line-height:1.25; color:{P["text"]}; }}
+.vmd  {{ font-size:18px; font-weight:700; color:{P["text"]}; }}
+.dlt  {{ font-size:12px; margin-top:3px; color:{P["text2"]}; }}
+.grn  {{ color:{P["green"]}  !important; }}
+.red  {{ color:{P["red"]}    !important; }}
+.yel  {{ color:{P["yellow"]} !important; }}
+.gry  {{ color:{P["text2"]}  !important; }}
+
+/* ── section header ──────────────────────────────────────────── */
+.shdr {{
+    font-size:11px; font-weight:700; text-transform:uppercase;
+    letter-spacing:.12em; color:{P["text2"]};
+    border-bottom:1px solid {P["border"]};
+    padding-bottom:5px; margin:20px 0 10px;
+}}
+
+/* ── banners ─────────────────────────────────────────────────── */
+.bull-banner {{
+    background:linear-gradient(90deg,#002d18,#003d20);
+    border:1px solid {P["green"]}; border-radius:8px;
+    padding:14px 22px; display:flex; justify-content:space-between;
+    align-items:center; margin:8px 0;
+}}
+.bear-banner {{
+    background:linear-gradient(90deg,#2d0000,#3d0000);
+    border:1px solid {P["red"]}; border-radius:8px;
+    padding:14px 22px; display:flex; justify-content:space-between;
+    align-items:center; margin:8px 0;
+}}
+.bl {{ font-size:14px; font-weight:800; letter-spacing:.1em; }}
+.bv {{ font-size:22px; font-weight:800; }}
+
+/* ── trade card ──────────────────────────────────────────────── */
+.tcard {{
+    background:{P["bg2"]}; border:1px solid {P["border"]};
+    border-radius:10px; padding:14px; margin-top:8px;
+}}
+.trow {{
+    display:flex; justify-content:space-between;
+    border-bottom:1px solid {P["border"]}; padding:7px 2px; font-size:12px;
+}}
+.trow:last-child {{ border-bottom:none; }}
+.tkey {{ color:{P["text2"]}; }}
+.tval {{ font-weight:600; text-align:right; max-width:62%; color:{P["text"]}; }}
+
+/* ── activity table ───────────────────────────────────────────── */
+.act-table {{ width:100%; font-size:13px; border-collapse:collapse; }}
+.act-table td {{
+    padding:6px 0; border-bottom:1px solid {P["border"]};
+    color:{P["text"]};
+}}
+.act-table td:last-child {{ text-align:right; font-weight:600; }}
+
+/* ── sortable table wrapper ───────────────────────────────────── */
+.sort-wrap {{
+    overflow-x:auto; border-radius:8px;
+    border:1px solid {P["border"]};
+}}
+.sort-tbl {{
+    width:100%; border-collapse:collapse; font-size:12px;
+}}
+.sort-tbl th {{
+    background:{P["bg3"]}; color:{P["text2"]};
+    padding:8px 10px; font-size:11px; text-transform:uppercase;
+    letter-spacing:.05em; cursor:pointer; white-space:nowrap;
+    user-select:none; position:sticky; top:0; z-index:1;
+}}
+.sort-tbl th:hover {{ background:{P["border"]}; color:{P["text"]}; }}
+.sort-tbl th .sort-arrow {{ margin-left:4px; opacity:.5; font-size:9px; }}
+.sort-tbl td {{
+    padding:6px 10px; border-bottom:1px solid {P["border"]};
+    color:{P["text"]}; vertical-align:middle;
+}}
+.sort-tbl tr:hover td {{ background:{P["bg3"]}; }}
+.sort-tbl tr:last-child td {{ border-bottom:none; }}
+
+/* ── options metrics ──────────────────────────────────────────── */
+.opt-row {{
+    display:flex; justify-content:space-between; align-items:flex-end;
+    border-bottom:1px solid {P["border"]}; padding:8px 2px;
+}}
+.opt-row:last-child {{ border-bottom:none; }}
+</style>
+""", unsafe_allow_html=True)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Sortable table JS component
+# ─────────────────────────────────────────────────────────────────────────────
+
+def sortable_table(headers: list[dict], rows: list[list], height: int = 400,
+                   key: str = "tbl") -> None:
+    """
+    Render a fully client-side sortable HTML table inside an iframe component.
+
+    headers: list of {"label": str, "key": str, "align": "left"|"right"|"center"}
+    rows:    list of lists — each cell is a str (may contain HTML for colour)
+    """
+    bg      = P["bg2"]
+    bg3     = P["bg3"]
+    border  = P["border"]
+    text    = P["text"]
+    text2   = P["text2"]
+    green   = P["green"]
+    red     = P["red"]
+    yellow  = P["yellow"]
+
+    hdr_html = "".join(
+        f'<th onclick="sortTable({i},this)" style="text-align:{h.get("align","left")}">'
+        f'{h["label"]}<span class="sa">▲</span></th>'
+        for i, h in enumerate(headers)
+    )
+
+    rows_html = ""
+    for row in rows:
+        cells = "".join(
+            f'<td style="text-align:{headers[i].get("align","left")}">{cell}</td>'
+            for i, cell in enumerate(row)
+        )
+        rows_html += f"<tr>{cells}</tr>"
+
+    html = f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  * {{ box-sizing:border-box; margin:0; padding:0; font-family:system-ui,sans-serif; }}
+  body {{ background:{bg}; color:{text}; overflow-x:auto; }}
+  table {{ width:100%; border-collapse:collapse; font-size:12px; }}
+  th {{
+      background:{bg3}; color:{text2}; padding:8px 10px;
+      font-size:11px; text-transform:uppercase; letter-spacing:.05em;
+      cursor:pointer; white-space:nowrap; user-select:none;
+      position:sticky; top:0; z-index:1; border-bottom:1px solid {border};
+  }}
+  th:hover {{ background:{border}; color:{text}; }}
+  th .sa {{ margin-left:4px; opacity:.4; font-size:9px; }}
+  th.asc  .sa::after {{ content:"▲"; opacity:1; }}
+  th.desc .sa::after {{ content:"▼"; opacity:1; }}
+  th.asc  .sa, th.desc .sa {{ opacity:0; }}
+  td {{ padding:6px 10px; border-bottom:1px solid {border}; vertical-align:middle; }}
+  tr:hover td {{ background:{bg3}; }}
+  tr:last-child td {{ border-bottom:none; }}
+  .grn {{ color:{green}; }}
+  .red {{ color:{red}; }}
+  .yel {{ color:{yellow}; }}
+  .gry {{ color:{text2}; }}
+  .bdg {{
+      font-size:10px; padding:2px 7px; border-radius:4px;
+      font-weight:700; display:inline-block;
+  }}
+  .bdg-g {{ background:{green}; color:#000; }}
+  .bdg-r {{ background:{red};   color:#fff; }}
+  .bdg-n {{ background:{bg3};   color:{text2}; border:1px solid {border}; }}
+</style>
+</head>
+<body>
+<table id="t">
+  <thead><tr>{hdr_html}</tr></thead>
+  <tbody id="tb">{rows_html}</tbody>
+</table>
+<script>
+let sortDir = {{}};
+function sortTable(col, th) {{
+  const tbody = document.getElementById("tb");
+  const rows  = Array.from(tbody.rows);
+  const dir   = sortDir[col] === "asc" ? "desc" : "asc";
+  sortDir[col] = dir;
+
+  // Reset all headers
+  document.querySelectorAll("th").forEach(h => h.classList.remove("asc","desc"));
+  th.classList.add(dir);
+
+  rows.sort((a, b) => {{
+    let av = a.cells[col].innerText.trim().replace(/[₹,+%×]/g,"");
+    let bv = b.cells[col].innerText.trim().replace(/[₹,+%×]/g,"");
+    const na = parseFloat(av), nb = parseFloat(bv);
+    if (!isNaN(na) && !isNaN(nb)) return dir==="asc" ? na-nb : nb-na;
+    return dir==="asc" ? av.localeCompare(bv) : bv.localeCompare(av);
+  }});
+  rows.forEach(r => tbody.appendChild(r));
+}}
+</script>
+</body>
+</html>"""
+    components.html(html, height=height, scrolling=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Cached data fetchers
 # ─────────────────────────────────────────────────────────────────────────────
 
 @st.cache_data(ttl=300, show_spinner=False)
-def get_signal(sym, dirn):
-    return compute_signal(sym, dirn.lower())
-
+def get_signal(sym, dirn): return compute_signal(sym, dirn.lower())
 
 @st.cache_data(ttl=300, show_spinner=False)
-def get_fiidii():
-    return fetch_fiidii_data()
-
+def get_fiidii(): return fetch_fiidii_data()
 
 @st.cache_data(ttl=300, show_spinner=False)
 def get_options(sym):
-    s = sym if sym in ("NIFTY", "BANKNIFTY") else "NIFTY"
+    s = sym if sym in ("NIFTY","BANKNIFTY") else "NIFTY"
     return fetch_options_data(s)
-
 
 @st.cache_data(ttl=120, show_spinner=False)
 def get_ohlcv_cached(ticker, period, interval):
     return download_ohlcv(ticker, period=period, interval=interval)
 
-
 @st.cache_data(ttl=60, show_spinner=False)
-def get_vix():
-    return download_vix()
-
+def get_vix(): return download_vix()
 
 @st.cache_data(ttl=120, show_spinner=False)
 def get_index_price(ticker):
     try:
-        df = get_ohlcv_cached(ticker, "5d", "1d")
+        df   = get_ohlcv_cached(ticker, "5d", "1d")
         last = float(df["close"].iloc[-1])
         prev = float(df["close"].iloc[-2])
-        chg = last - prev
-        pct = chg / prev * 100
-        return last, chg, pct
+        pct  = (last - prev) / prev * 100
+        return last, last - prev, pct
     except Exception:
         return 0.0, 0.0, 0.0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Tiny HTML helpers
+# Mini helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
 def label_colour(label):
-    return {"HIGH-CONFIDENCE": "#00c853", "WATCH": "#ffab00",
-            "PARTIAL": "#1565c0", "NO SIGNAL": "#757575"}.get(label, "#aaa")
+    return {"HIGH-CONFIDENCE": P["green"], "WATCH": P["yellow"],
+            "PARTIAL": "#1565c0", "NO SIGNAL": P["text2"]}.get(label, P["text2"])
 
+def direction_icon(d): return "🟢 BUY" if d == "LONG" else "🔴 SELL"
 
-def direction_icon(d):
-    return "🟢 BUY" if d == "LONG" else "🔴 SELL"
+def _cr(v):
+    s = "+" if v >= 0 else ""
+    c = "grn" if v >= 0 else "red"
+    return f'<span class="{c}">{s}₹{v:,.0f} Cr</span>'
 
-
-def badge(text, bg="#00c853", fg="#000"):
+def badge(text, bg, fg="#fff"):
     return (f'<span style="background:{bg};color:{fg};font-size:10px;'
             f'padding:2px 8px;border-radius:4px;font-weight:700;">{text}</span>')
 
+def shdr(text):
+    st.markdown(f'<div class="shdr">{text}</div>', unsafe_allow_html=True)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ── Row 1: Header
+# Row 1 — Live header
 # ─────────────────────────────────────────────────────────────────────────────
 
 def render_header(fiidii):
     now = datetime.datetime.now().strftime("%d %b %Y · %H:%M:%S IST")
-    dot = ("🟢" if fiidii["institutional_bias"] == "BULLISH"
-           else "🔴" if fiidii["institutional_bias"] == "BEARISH" else "🟡")
+    dot = ("🟢" if fiidii["institutional_bias"]=="BULLISH"
+           else "🔴" if fiidii["institutional_bias"]=="BEARISH" else "🟡")
+    mode_icon = "🌙" if IS_DARK else "☀️"
     st.markdown(
         f'<div style="display:flex;justify-content:space-between;align-items:center;'
-        f'padding:6px 4px 10px;border-bottom:1px solid #2a2d3a;margin-bottom:14px;">'
-        f'<span style="font-size:13px;color:#8a8fa8;">'
+        f'padding:6px 4px 12px;border-bottom:1px solid {P["border"]};margin-bottom:14px;">'
+        f'<span style="font-size:13px;color:{P["text2"]};">'
         f'{dot}&nbsp; Live &nbsp;·&nbsp; NSE &nbsp;·&nbsp; {now}</span>'
-        f'<span style="font-size:11px;color:#444;">Stock Advisor v2.0</span>'
-        f'</div>',
-        unsafe_allow_html=True)
+        f'<span style="font-size:11px;color:{P["text3"]};">'
+        f'{mode_icon} Stock Advisor v3.0</span>'
+        f'</div>', unsafe_allow_html=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ── Row 2: FII/DII metric tiles
+# Row 2 — FII/DII metric tiles
 # ─────────────────────────────────────────────────────────────────────────────
 
 def render_fiidii_tiles(fiidii):
-    fii_net = fiidii["fii_cash_net_cr"]
-    dii_net = fiidii["dii_cash_net_cr"]
-    combined = fiidii["combined_net_cr"]
-    ratio = abs(fii_net / dii_net) if dii_net != 0 else 0
+    fii, dii  = fiidii["fii_cash_net_cr"], fiidii["dii_cash_net_cr"]
+    combined  = fiidii["combined_net_cr"]
+    ratio     = abs(fii / dii) if dii != 0 else 0
 
-    def _sign_cr(v):
-        s = "+" if v >= 0 else ""
-        c = "green" if v >= 0 else "red"
-        return f'<span class="{c}">{s}₹{v:,.0f} Cr</span>'
-
-    c1, c2, c3, c4 = st.columns(4)
-    tiles = [
-        (c1, "FII NET BUY", _sign_cr(fii_net),
-         f'<span class="green">▲ +₹{abs(fii_net) * 0.08:,.0f} Cr vs yesterday</span>', ""),
-        (c2, "DII NET BUY", _sign_cr(dii_net),
-         f'<span class="green">▲ +₹{abs(dii_net) * 0.05:,.0f} Cr vs yesterday</span>', ""),
-        (c3, "COMBINED NETFLOW", _sign_cr(combined),
-         f'{"Bullish" if combined >= 0 else "Bearish"} institutional bias', ""),
-        (c4, "FII/DII RATIO",
-         f'<span class="green">{ratio:.2f}x</span>',
-         f'{"FII" if abs(fii_net) >= abs(dii_net) else "DII"} dominance today', ""),
-    ]
-    for col, lbl, val, sub, _ in tiles:
+    def tile(col, lbl, val_html, sub_html):
         with col:
             st.markdown(
-                f'<div class="metric-tile">'
-                f'<div class="label">{lbl}</div>'
-                f'<div class="val-lg">{val}</div>'
-                f'<div class="delta grey">{sub}</div>'
-                f'</div>',
+                f'<div class="tile"><div class="lbl">{lbl}</div>'
+                f'<div class="vl">{val_html}</div>'
+                f'<div class="dlt">{sub_html}</div></div>',
                 unsafe_allow_html=True)
+
+    c1,c2,c3,c4 = st.columns(4)
+    tile(c1, "FII NET BUY",      _cr(fii),
+         f'<span class="grn">▲ +₹{abs(fii)*0.08:,.0f} Cr vs yesterday</span>')
+    tile(c2, "DII NET BUY",      _cr(dii),
+         f'<span class="grn">▲ +₹{abs(dii)*0.05:,.0f} Cr vs yesterday</span>')
+    tile(c3, "COMBINED NETFLOW", _cr(combined),
+         f'{"Bullish" if combined>=0 else "Bearish"} institutional bias')
+    tile(c4, "FII / DII RATIO",
+         f'<span class="grn">{ratio:.2f}×</span>',
+         f'{"FII" if abs(fii)>=abs(dii) else "DII"} dominance today')
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ── Row 3: Index strip
+# Row 3 — Index strip
 # ─────────────────────────────────────────────────────────────────────────────
 
 def render_index_strip(vix):
-    indices = [("Nifty 50", "^NSEI"), ("Sensex", "^BSESN"), ("Bank Nifty", "^NSEBANK")]
-    cols = st.columns([1, 1, 1, 0.65])
+    indices = [("Nifty 50","^NSEI"),("Sensex","^BSESN"),("Bank Nifty","^NSEBANK")]
+    cols    = st.columns([1,1,1,0.65])
     for col, (name, tkr) in zip(cols[:3], indices):
         price, _, pct = get_index_price(tkr)
-        cc = "green" if pct >= 0 else "red"
+        cc   = "grn" if pct >= 0 else "red"
         sign = "+" if pct >= 0 else ""
         with col:
             st.markdown(
-                f'<div class="metric-tile" style="padding:10px 14px;">'
-                f'<div class="label">{name}</div>'
+                f'<div class="tile" style="padding:10px 14px;">'
+                f'<div class="lbl">{name}</div>'
                 f'<div style="display:flex;align-items:baseline;gap:8px;">'
-                f'<span class="val-md">{price:,.2f}</span>'
+                f'<span class="vmd">{price:,.2f}</span>'
                 f'<span class="{cc}" style="font-size:13px;">{sign}{pct:.2f}%</span>'
-                f'</div></div>',
-                unsafe_allow_html=True)
+                f'</div></div>', unsafe_allow_html=True)
     with cols[3]:
-        vc = "green" if vix < 14 else ("yellow" if vix < 20 else "red")
-        vl = "Low" if vix < 14 else ("Elevated" if vix < 20 else "High ⚠️")
+        vc = "grn" if vix<14 else ("yel" if vix<20 else "red")
+        vl = "Low — risk on" if vix<14 else ("Elevated" if vix<20 else "High ⚠️")
         st.markdown(
-            f'<div class="metric-tile" style="padding:10px 14px;">'
-            f'<div class="label">India VIX</div>'
+            f'<div class="tile" style="padding:10px 14px;">'
+            f'<div class="lbl">India VIX</div>'
             f'<div style="display:flex;align-items:baseline;gap:8px;">'
-            f'<span class="val-md {vc}">{vix:.2f}</span>'
+            f'<span class="vmd {vc}">{vix:.2f}</span>'
             f'<span class="{vc}" style="font-size:12px;">{vl}</span>'
-            f'</div></div>',
-            unsafe_allow_html=True)
+            f'</div></div>', unsafe_allow_html=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ── Row 4: Intraday flow charts
+# Row 4 — Intraday flow charts
 # ─────────────────────────────────────────────────────────────────────────────
 
 def render_intraday_charts(fiidii):
-    def _mock(net, seed_extra=0):
-        rng = np.random.default_rng(abs(int(net * 10)) % 9999 + seed_extra)
-        n = 14
-        inc = rng.normal(net / n, abs(net) * 0.09 + 1, n)
+    def _mock(net, seed=0):
+        rng = np.random.default_rng(abs(int(net*10))%9999+seed)
+        n, inc = 14, rng.normal(net/14, abs(net)*0.09+1, 14)
         inc[0] = 0
-        return pd.DataFrame({
-            "time": pd.date_range("09:15", periods=n, freq="30min"),
-            "flow": np.cumsum(inc),
-        })
-
-    fii_df = _mock(fiidii["fii_cash_net_cr"], 0)
-    dii_df = _mock(fiidii["dii_cash_net_cr"], 7)
+        return pd.DataFrame({"t": pd.date_range("09:15",periods=n,freq="30min"),
+                              "v": np.cumsum(inc)})
 
     def _chart(df, title, rgb):
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(
-            x=df["time"], y=df["flow"],
+        fig = go.Figure(go.Scatter(
+            x=df["t"], y=df["v"],
             fill="tozeroy", fillcolor=f"rgba({rgb},0.12)",
-            line=dict(color=f"rgb({rgb})", width=2), mode="lines",
+            line=dict(color=f"rgb({rgb})",width=2), mode="lines",
+            hovertemplate="<b>%{x|%H:%M}</b><br>₹%{y:,.0f} Cr<extra></extra>",
         ))
         fig.update_layout(
-            title=dict(text=title, font=dict(size=12)),
-            height=210, margin=dict(l=8, r=8, t=35, b=8),
-            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-            font_color="white",
-            xaxis=dict(showgrid=False, tickformat="%H:%M", tickfont=dict(size=10)),
-            yaxis=dict(showgrid=True, gridcolor="#1e2130",
-                       tickprefix="₹", tickfont=dict(size=10)),
+            title=dict(text=title, font=dict(size=12, color=P["text"])),
+            height=210, margin=dict(l=8,r=8,t=35,b=8),
+            paper_bgcolor=P["chart_bg"], plot_bgcolor=P["chart_bg"],
+            font_color=P["text"],
+            xaxis=dict(showgrid=False, tickformat="%H:%M",
+                       tickfont=dict(size=10), color=P["text2"],
+                       linecolor=P["border"]),
+            yaxis=dict(showgrid=True, gridcolor=P["chart_grid"],
+                       tickprefix="₹", tickfont=dict(size=10),
+                       color=P["text2"], linecolor=P["border"],
+                       zeroline=True, zerolinecolor=P["border"]),
+            hovermode="x unified",
         )
         return fig
 
-    c1, c2 = st.columns(2)
-    with c1: st.plotly_chart(_chart(fii_df, "FII intraday netflow (₹ Cr)", "0,200,83"), use_container_width=True)
-    with c2: st.plotly_chart(_chart(dii_df, "DII intraday netflow (₹ Cr)", "33,150,243"), use_container_width=True)
+    c1,c2 = st.columns(2)
+    with c1: st.plotly_chart(_chart(_mock(fiidii["fii_cash_net_cr"],0), "FII intraday netflow (₹ Cr)","0,200,83"), use_container_width=True)
+    with c2: st.plotly_chart(_chart(_mock(fiidii["dii_cash_net_cr"],7), "DII intraday netflow (₹ Cr)","33,150,243"), use_container_width=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ── Row 5: Activity breakdown tables
+# Row 5 — Activity breakdown (SORTABLE)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def render_activity_breakdown(fiidii):
-    fii = fiidii["fii_cash_net_cr"]
-    dii = fiidii["dii_cash_net_cr"]
+    fii, dii = fiidii["fii_cash_net_cr"], fiidii["dii_cash_net_cr"]
 
-    fii_rows = [("Cash (equity)", fii * 0.68), ("Index futures", fii * 0.23),
-                ("Stock futures", fii * 0.05), ("Options (net)", fii * -0.03),
-                ("Debt", fii * 0.07), ("Total FII", fii)]
-    dii_rows = [("Mutual funds (equity)", dii * 0.57), ("Insurance cos.", dii * 0.32),
-                ("Banks / FIs", dii * 0.08), ("Pension funds", dii * 0.03),
-                ("Debt / hybrid", 0.0), ("Total DII", dii)]
+    def _color_cr(v):
+        s = "+" if v >= 0 else ""
+        c = "grn" if v >= 0 else ("red" if v < 0 else "gry")
+        return f'<span class="{c}">{s}₹{v:,.0f}</span>'
+
+    fii_data = [
+        ["Cash (equity)",  fii*0.68,  fii*0.68/abs(fii)*100  if fii else 0],
+        ["Index futures",  fii*0.23,  fii*0.23/abs(fii)*100  if fii else 0],
+        ["Stock futures",  fii*0.05,  fii*0.05/abs(fii)*100  if fii else 0],
+        ["Options (net)", -fii*0.03, -fii*0.03/abs(fii)*100  if fii else 0],
+        ["Debt",           fii*0.07,  fii*0.07/abs(fii)*100  if fii else 0],
+        ["TOTAL FII",      fii,       100.0],
+    ]
+    dii_data = [
+        ["Mutual funds (equity)", dii*0.57, 57.0],
+        ["Insurance cos.",        dii*0.32, 32.0],
+        ["Banks / FIs",           dii*0.08,  8.0],
+        ["Pension funds",         dii*0.03,  3.0],
+        ["Debt / hybrid",         0.0,       0.0],
+        ["TOTAL DII",             dii,     100.0],
+    ]
+
+    hdrs = [
+        {"label":"Category",     "key":"cat",  "align":"left"},
+        {"label":"Net (₹ Cr)",   "key":"net",  "align":"right"},
+        {"label":"Share %",      "key":"pct",  "align":"right"},
+    ]
+
+    def _rows(data):
+        out = []
+        for cat, net, pct in data:
+            bld = "font-weight:800;" if cat.startswith("TOTAL") else ""
+            out.append([
+                f'<span style="{bld}">{cat}</span>',
+                f'<span style="{bld}">{_color_cr(net)}</span>',
+                f'<span style="{bld}">{pct:.1f}%</span>',
+            ])
+        return out
 
     def _bdg(net):
-        return (badge("Net buyer", "#00c853", "#000") if net >= 0
-                else badge("Net seller", "#ef5350", "#fff"))
-
-    def _tbl(rows):
-        h = '<table class="act-table">'
-        for lbl, v in rows:
-            s = "+" if v >= 0 else ""
-            cc = "green" if v >= 0 else ("red" if v < 0 else "grey")
-            bld = "font-weight:800;" if lbl.startswith("Total") else ""
-            h += (f'<tr><td style="{bld}">{lbl}</td>'
-                  f'<td class="{cc}" style="{bld}">{s}₹{v:,.0f} Cr</td></tr>')
-        return h + "</table>"
+        return (badge("Net buyer", P["green"], "#000") if net >= 0
+                else badge("Net seller", P["red"], "#fff"))
 
     c1, c2 = st.columns(2)
-    for col, label, net, rows in [
-        (c1, "FII activity breakdown", fii, fii_rows),
-        (c2, "DII activity breakdown", dii, dii_rows),
-    ]:
+    for col, lbl, net, data in [(c1,"FII activity breakdown",fii,fii_data),
+                                  (c2,"DII activity breakdown",dii,dii_data)]:
         with col:
             st.markdown(
-                f'<div class="metric-tile">'
                 f'<div style="display:flex;justify-content:space-between;'
-                f'align-items:center;margin-bottom:10px;">'
-                f'<span style="font-size:13px;font-weight:600;">{label}</span>'
-                f'{_bdg(net)}</div>'
-                f'{_tbl(rows)}</div>',
-                unsafe_allow_html=True)
+                f'align-items:center;margin-bottom:6px;">'
+                f'<span style="font-size:13px;font-weight:600;color:{P["text"]};">{lbl}</span>'
+                f'{_bdg(net)}</div>', unsafe_allow_html=True)
+            sortable_table(hdrs, _rows(data), height=220, key=f"act_{lbl[:3]}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ── Row 6: Sector FII flow
+# Row 6 — Sector FII flow
 # ─────────────────────────────────────────────────────────────────────────────
 
 def render_sector_flow(fiidii):
     fii = fiidii["fii_cash_net_cr"]
-    sectors = ["IT", "Banks", "Auto", "FMCG", "Pharma", "Energy", "Metals", "Realty", "Infra", "Others"]
-    weights = [0.22, 0.28, 0.10, 0.08, 0.07, 0.09, 0.06, 0.04, 0.03, 0.03]
-    rng = np.random.default_rng(abs(int(fii)) % 5555)
-    vals = [fii * w * rng.uniform(0.8, 1.2) for w in weights]
+    sectors = ["IT","Banks","Auto","FMCG","Pharma","Energy","Metals","Realty","Infra","Others"]
+    weights = [0.22,0.28,0.10,0.08,0.07,0.09,0.06,0.04,0.03,0.03]
+    rng  = np.random.default_rng(abs(int(fii))%5555)
+    vals = [fii*w*rng.uniform(0.8,1.2) for w in weights]
 
     fig = go.Figure(go.Bar(
         x=sectors, y=vals,
-        marker_color=["#00c853" if v >= 0 else "#ef5350" for v in vals],
+        marker_color=[P["green"] if v>=0 else P["red"] for v in vals],
         text=[f"₹{v:,.0f}" for v in vals],
-        textposition="outside", textfont=dict(size=10),
+        textposition="outside", textfont=dict(size=10, color=P["text"]),
+        hovertemplate="<b>%{x}</b><br>₹%{y:,.0f} Cr<extra></extra>",
     ))
     fig.update_layout(
-        title=dict(text="Sector-wise FII flow today (₹ Cr)", font=dict(size=12)),
-        height=230, margin=dict(l=8, r=8, t=38, b=8),
-        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-        font_color="white",
-        xaxis=dict(showgrid=False),
-        yaxis=dict(showgrid=True, gridcolor="#1e2130", zeroline=True, zerolinecolor="#555"),
+        title=dict(text="Sector-wise FII flow today (₹ Cr)",
+                   font=dict(size=12, color=P["text"])),
+        height=235, margin=dict(l=8,r=8,t=38,b=8),
+        paper_bgcolor=P["chart_bg"], plot_bgcolor=P["chart_bg"],
+        font_color=P["text"],
+        xaxis=dict(showgrid=False, color=P["text2"], linecolor=P["border"]),
+        yaxis=dict(showgrid=True, gridcolor=P["chart_grid"],
+                   zeroline=True, zerolinecolor=P["border"], color=P["text2"]),
     )
     st.plotly_chart(fig, use_container_width=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ── Row 7: Institutional signal banner
+# Row 7 — Institutional signal banner
 # ─────────────────────────────────────────────────────────────────────────────
 
 def render_inst_banner(fiidii):
     combined = fiidii["combined_net_cr"]
-    bias = fiidii["institutional_bias"]
-    cls = "bull-banner" if bias == "BULLISH" else "bear-banner"
-    lbl = ("🟢 INSTITUTIONAL BULL SIGNAL" if bias == "BULLISH"
-           else "🔴 INSTITUTIONAL BEAR SIGNAL" if bias == "BEARISH"
-    else "🟡 INSTITUTIONAL NEUTRAL")
+    bias     = fiidii["institutional_bias"]
+    cls  = "bull-banner" if bias=="BULLISH" else "bear-banner"
+    lbl  = ("🟢 INSTITUTIONAL BULL SIGNAL" if bias=="BULLISH"
+            else "🔴 INSTITUTIONAL BEAR SIGNAL" if bias=="BEARISH"
+            else "🟡 INSTITUTIONAL NEUTRAL")
     sign = "+" if combined >= 0 else ""
     st.markdown(
-        f'<div class="{cls}">'
-        f'<span class="banner-label">{lbl}</span>'
-        f'<span class="banner-value">{sign}₹{combined:,.0f} Cr</span>'
-        f'</div>',
+        f'<div class="{cls}"><span class="bl">{lbl}</span>'
+        f'<span class="bv">{sign}₹{combined:,.0f} Cr</span></div>',
         unsafe_allow_html=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ── Row 8: Price chart
+# Row 8 — TradingView-style price chart
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _bollinger(close, n=20, k=2):
+    sma  = close.rolling(n).mean()
+    std  = close.rolling(n).std()
+    return sma + k*std, sma, sma - k*std
+
 def render_price_chart(ticker, sym, tf):
-    period = {"1d": "3mo", "1h": "30d", "15m": "5d"}.get(tf, "3mo")
+    period = {"1d":"1y","1h":"60d","15m":"5d"}.get(tf,"1y")
     try:
         df = get_ohlcv_cached(ticker, period=period, interval=tf)
     except Exception:
-        st.warning("Price data unavailable.");
-        return
+        st.warning("Price data unavailable."); return
 
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
-                        row_heights=[0.75, 0.25], vertical_spacing=0.015)
+    close  = df["close"]
+    rsi14  = _rsi(close, 14).fillna(50)
+    macd_l, macd_s = _macd(close)
+    macd_h = macd_l - macd_s
+    bb_up, bb_mid, bb_lo = _bollinger(close)
 
+    # Support/Resistance: rolling 20-bar max/min
+    s_lvl = float(df["low"].rolling(20).min().iloc[-1])
+    r_lvl = float(df["high"].rolling(20).max().iloc[-1])
+
+    fig = make_subplots(
+        rows=4, cols=1, shared_xaxes=True,
+        row_heights=[0.56, 0.16, 0.15, 0.13],
+        vertical_spacing=0.012,
+        subplot_titles=["", "RSI (14)", "MACD (12,26,9)", "Volume"],
+    )
+
+    # ── Candlestick ──────────────────────────────────────────────────────────
     fig.add_trace(go.Candlestick(
         x=df.index, open=df["open"], high=df["high"],
-        low=df["low"], close=df["close"], name=sym,
-        increasing_line_color="#26a69a", decreasing_line_color="#ef5350",
+        low=df["low"], close=close, name=sym,
+        increasing=dict(line=dict(color=P["up_candle"], width=1),
+                        fillcolor=P["up_candle"]),
+        decreasing=dict(line=dict(color=P["dn_candle"], width=1),
+                        fillcolor=P["dn_candle"]),
+        hoverinfo="x+y",
     ), row=1, col=1)
 
-    for n, col in [(20, "#ffa726"), (50, "#42a5f5"), (200, "#ce93d8")]:
+    # Bollinger Bands
+    fig.add_trace(go.Scatter(x=df.index, y=bb_up,  name="BB Upper",
+                             line=dict(color="rgba(100,160,255,0.5)",width=1,dash="dot"),
+                             showlegend=True, hoverinfo="skip"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=bb_mid, name="BB Mid (SMA20)",
+                             line=dict(color="rgba(100,160,255,0.35)",width=1),
+                             showlegend=True, hoverinfo="skip"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=bb_lo,  name="BB Lower",
+                             line=dict(color="rgba(100,160,255,0.5)",width=1,dash="dot"),
+                             fill="tonexty",
+                             fillcolor="rgba(100,160,255,0.04)",
+                             showlegend=False, hoverinfo="skip"), row=1, col=1)
+
+    # EMAs
+    for n, col in [(20,P["orange"]),(50,P["blue"]),(200,P["purple"])]:
         if len(df) > n:
             fig.add_trace(go.Scatter(
-                x=df.index, y=_ema(df["close"], n), name=f"EMA{n}",
-                line=dict(color=col, width=1.2), hoverinfo="skip",
+                x=df.index, y=_ema(close,n), name=f"EMA{n}",
+                line=dict(color=col,width=1.3),
+                hovertemplate=f"EMA{n}: %{{y:,.2f}}<extra></extra>",
             ), row=1, col=1)
 
-    vol_cols = ["#26a69a" if float(df["close"].iloc[i]) >= float(df["open"].iloc[i])
-                else "#ef5350" for i in range(len(df))]
-    fig.add_trace(go.Bar(
-        x=df.index, y=df["volume"], marker_color=vol_cols,
-        opacity=0.55, showlegend=False, name="Volume",
-    ), row=2, col=1)
+    # S/R lines
+    fig.add_hline(y=s_lvl, line=dict(color=P["green"],width=1,dash="dot"),
+                  annotation_text=f"S {s_lvl:,.0f}",
+                  annotation_font=dict(color=P["green"],size=10),
+                  annotation_position="right", row=1, col=1)
+    fig.add_hline(y=r_lvl, line=dict(color=P["red"],width=1,dash="dot"),
+                  annotation_text=f"R {r_lvl:,.0f}",
+                  annotation_font=dict(color=P["red"],size=10),
+                  annotation_position="right", row=1, col=1)
 
-    fig.update_layout(
-        title=dict(text=f"{sym} — {tf.upper()} Chart (EMA 20 / 50 / 200)", font=dict(size=14)),
-        xaxis_rangeslider_visible=False, height=450,
-        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(10,12,18,1)",
-        font_color="white",
-        legend=dict(orientation="h", y=1.04, font=dict(size=11)),
-        margin=dict(l=8, r=8, t=42, b=8),
+    # Watermark
+    last_price = float(close.iloc[-1])
+    prev_price = float(close.iloc[-2])
+    wp_col = P["up_candle"] if last_price >= prev_price else P["dn_candle"]
+    fig.add_annotation(
+        xref="paper", yref="paper", x=0.98, y=0.42,
+        text=f'<span style="font-size:22px;font-weight:700;opacity:.18;">{sym}</span>',
+        showarrow=False, align="right", font=dict(color=P["text"], size=22),
     )
-    fig.update_yaxes(showgrid=True, gridcolor="#1a1d27", row=1, col=1)
-    fig.update_yaxes(showgrid=False, row=2, col=1)
+
+    # ── RSI ──────────────────────────────────────────────────────────────────
+    fig.add_trace(go.Scatter(
+        x=df.index, y=rsi14, name="RSI",
+        line=dict(color=P["purple"],width=1.4),
+        hovertemplate="RSI: %{y:.1f}<extra></extra>",
+    ), row=2, col=1)
+    for lvl, col in [(70,P["red"]),(50,P["text2"]),(30,P["green"])]:
+        fig.add_hline(y=lvl, line=dict(color=col,width=0.7,dash="dot"), row=2, col=1)
+    fig.add_hrect(y0=30, y1=70, fillcolor="rgba(255,255,255,0.02)",
+                  line_width=0, row=2, col=1)
+
+    # ── MACD ─────────────────────────────────────────────────────────────────
+    macd_colours = [P["green"] if v >= 0 else P["red"] for v in macd_h.fillna(0)]
+    fig.add_trace(go.Bar(
+        x=df.index, y=macd_h, name="MACD Hist",
+        marker_color=macd_colours, opacity=0.7,
+        hovertemplate="Hist: %{y:.2f}<extra></extra>",
+    ), row=3, col=1)
+    fig.add_trace(go.Scatter(
+        x=df.index, y=macd_l, name="MACD",
+        line=dict(color=P["blue"],width=1.2),
+        hovertemplate="MACD: %{y:.2f}<extra></extra>",
+    ), row=3, col=1)
+    fig.add_trace(go.Scatter(
+        x=df.index, y=macd_s, name="Signal",
+        line=dict(color=P["orange"],width=1.2),
+        hovertemplate="Signal: %{y:.2f}<extra></extra>",
+    ), row=3, col=1)
+
+    # ── Volume ────────────────────────────────────────────────────────────────
+    vcols = [P["up_candle"] if float(close.iloc[i]) >= float(df["open"].iloc[i])
+             else P["dn_candle"] for i in range(len(df))]
+    fig.add_trace(go.Bar(
+        x=df.index, y=df["volume"], marker_color=vcols,
+        opacity=0.65, showlegend=False, name="Volume",
+        hovertemplate="Vol: %{y:,.0f}<extra></extra>",
+    ), row=4, col=1)
+
+    # ── Layout ────────────────────────────────────────────────────────────────
+    common_axis = dict(
+        showgrid=True, gridcolor=P["chart_grid"], gridwidth=1,
+        zeroline=False, color=P["text2"],
+        linecolor=P["border"], tickfont=dict(size=10, color=P["text2"]),
+        showspikes=True, spikecolor=P["chart_cross"],
+        spikethickness=1, spikedash="dot", spikemode="across",
+    )
+    fig.update_layout(
+        height=660,
+        paper_bgcolor=P["chart_bg"],
+        plot_bgcolor=P["chart_bg"],
+        font=dict(color=P["text"], size=11),
+        title=dict(
+            text=f'<b>{sym}</b>  <span style="font-size:12px;color:{wp_col};">'
+                 f'{last_price:,.2f}  {"▲" if last_price>=prev_price else "▼"} '
+                 f'{(last_price-prev_price)/prev_price*100:+.2f}%</span>  '
+                 f'<span style="font-size:11px;color:{P["text2"]};">{tf.upper()}</span>',
+            font=dict(size=15, color=P["text"]),
+        ),
+        xaxis_rangeslider_visible=False,
+        legend=dict(
+            orientation="h", y=1.02, x=0,
+            font=dict(size=10), bgcolor="rgba(0,0,0,0)",
+            bordercolor=P["border"],
+        ),
+        margin=dict(l=8,r=60,t=52,b=8),
+        hovermode="x unified",
+        hoverlabel=dict(
+            bgcolor=P["bg2"], bordercolor=P["border"],
+            font=dict(color=P["text"], size=11),
+        ),
+        # Range selector buttons (TradingView style)
+        xaxis=dict(
+            **common_axis,
+            rangeselector=dict(
+                buttons=[
+                    dict(count=5,  label="5D",  step="day",  stepmode="backward"),
+                    dict(count=1,  label="1M",  step="month",stepmode="backward"),
+                    dict(count=3,  label="3M",  step="month",stepmode="backward"),
+                    dict(count=6,  label="6M",  step="month",stepmode="backward"),
+                    dict(count=1,  label="1Y",  step="year", stepmode="backward"),
+                    dict(step="all", label="All"),
+                ],
+                bgcolor=P["bg3"], activecolor=P["blue"],
+                font=dict(color=P["text"], size=10),
+                bordercolor=P["border"],
+                x=0, y=1.01,
+            ),
+        ),
+        xaxis2=dict(**common_axis),
+        xaxis3=dict(**common_axis),
+        xaxis4=dict(**common_axis, rangeslider=dict(visible=False)),
+        yaxis =dict(**common_axis, title="Price"),
+        yaxis2=dict(**common_axis, title="RSI",  range=[0,100]),
+        yaxis3=dict(**common_axis, title="MACD"),
+        yaxis4=dict(**common_axis, title="Vol"),
+    )
+
+    # Subplot title colours
+    for ann in fig.layout.annotations:
+        ann.font.color = P["text2"]
+        ann.font.size  = 10
+
     st.plotly_chart(fig, use_container_width=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ── Row 9: Confluence gauges + trade plan cards
+# Row 9 — Confluence gauges + trade plan
 # ─────────────────────────────────────────────────────────────────────────────
 
 def make_gauge(score, label, dirn):
@@ -487,93 +792,89 @@ def make_gauge(score, label, dirn):
     fig = go.Figure(go.Indicator(
         mode="gauge+number",
         value=score,
-        title={"text": f"{direction_icon(dirn)}<br><span style='font-size:11px;color:#8a8fa8'>{label}</span>",
-               "font": {"size": 14}},
+        title={"text": f"{direction_icon(dirn)}<br>"
+                       f"<span style='font-size:11px;color:{P['text2']}'>{label}</span>",
+               "font": {"size": 14, "color": P["text"]}},
         gauge={
-            "axis": {"range": [0, 100], "tickwidth": 1, "tickcolor": "#555"},
-            "bar": {"color": colour},
-            "bgcolor": "#13161e", "bordercolor": "#2a2d3a",
+            "axis": {"range":[0,100],"tickwidth":1,"tickcolor":P["text2"],
+                     "tickfont":{"color":P["text2"]}},
+            "bar":  {"color": colour},
+            "bgcolor":     P["bg3"],
+            "bordercolor": P["border"],
             "steps": [
-                {"range": [0, 50], "color": "#1a1d27"},
-                {"range": [50, 75], "color": "#1a2d40"},
-                {"range": [75, 95], "color": "#1a3a28"},
-                {"range": [95, 100], "color": "#003820"},
+                {"range":[0,50],  "color": P["bg2"]},
+                {"range":[50,75], "color": "#1a2d40" if IS_DARK else "#d0e8ff"},
+                {"range":[75,95], "color": "#1a3a28" if IS_DARK else "#c8f0d8"},
+                {"range":[95,100],"color": "#003820" if IS_DARK else "#a0e8b8"},
             ],
-            "threshold": {"line": {"color": "#ffab00", "width": 3}, "thickness": 0.8, "value": 95},
+            "threshold": {"line":{"color":P["yellow"],"width":3},"thickness":0.8,"value":95},
         },
-        number={"suffix": "%", "font": {"size": 34}, "valueformat": ".0f"},
+        number={"suffix":"%","font":{"size":34,"color":P["text"]},"valueformat":".0f"},
     ))
     fig.update_layout(
-        height=220, margin=dict(l=18, r=18, t=55, b=8),
-        paper_bgcolor="rgba(0,0,0,0)", font_color="white",
+        height=220, margin=dict(l=18,r=18,t=55,b=8),
+        paper_bgcolor=P["bg2"], font_color=P["text"],
     )
     return fig
 
 
 def make_score_bars(tech, inst, opt):
-    cats = ["Technical (65)", "Institutional (20)", "Options (15)"]
-    vals = [tech, inst, opt]
-    maxes = [65, 20, 15]
-    colors = ["#42a5f5", "#66bb6a", "#ffa726"]
-    fig = go.Figure()
+    cats   = ["Technical (65)","Institutional (20)","Options (15)"]
+    vals   = [tech, inst, opt]
+    maxes  = [65, 20, 15]
+    colors = [P["blue"], P["green"], P["orange"]]
+    fig    = go.Figure()
     for cat, val, mx, col in zip(cats, vals, maxes, colors):
         fig.add_trace(go.Bar(
             x=[val], y=[cat], orientation="h",
             marker_color=col,
             text=[f"{val}/{mx}"], textposition="inside",
+            textfont=dict(color="#fff", size=10),
             hovertemplate=f"{cat}: {val}/{mx}<extra></extra>",
         ))
         fig.add_trace(go.Bar(
-            x=[mx - val], y=[cat], orientation="h",
-            marker_color="rgba(255,255,255,0.04)",
+            x=[mx-val], y=[cat], orientation="h",
+            marker_color="rgba(255,255,255,0.05)",
             showlegend=False, hoverinfo="skip",
         ))
     fig.update_layout(
-        barmode="stack", height=120, showlegend=False,
-        margin=dict(l=4, r=4, t=4, b=4),
-        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-        font_color="white",
-        xaxis=dict(visible=False, range=[0, 100]),
-        yaxis=dict(tickfont=dict(size=11)),
+        barmode="stack", height=115, showlegend=False,
+        margin=dict(l=4,r=4,t=4,b=4),
+        paper_bgcolor=P["bg2"], plot_bgcolor="rgba(0,0,0,0)",
+        font_color=P["text"],
+        xaxis=dict(visible=False, range=[0,100]),
+        yaxis=dict(tickfont=dict(size=11, color=P["text2"])),
     )
     return fig
 
 
 def render_trade_plan(sig):
     opts = sig.options
-    iv = opts.get("iv_percentile", 50)
-    spot = sig.spot
-    atm = int(spot // 50 * 50)
-
+    iv, spot, atm = opts.get("iv_percentile",50), sig.spot, int(sig.spot//50*50)
     if sig.direction == "LONG":
-        opts_play = (f"Buy {atm} CE outright (IV cheap)" if iv < 30
-                     else f"Bull call spread: Buy {atm} CE / Sell {atm + 200} CE")
+        op = (f"Buy {atm} CE outright (IV cheap)" if iv<30
+              else f"Bull call spread: Buy {atm} CE / Sell {atm+200} CE")
     else:
-        opts_play = (f"Buy {atm} PE outright (IV cheap)" if iv < 30
-                     else f"Bear put spread: Buy {atm} PE / Sell {atm - 200} PE")
+        op = (f"Buy {atm} PE outright (IV cheap)" if iv<30
+              else f"Bear put spread: Buy {atm} PE / Sell {atm-200} PE")
 
-    rr_col = "green" if sig.rr >= 2 else ("yellow" if sig.rr >= 1 else "red")
-
+    rr_col = P["green"] if sig.rr>=2 else (P["yellow"] if sig.rr>=1 else P["red"])
     rows = [
-        ("Direction", direction_icon(sig.direction)),
-        ("Spot price", f"₹{sig.spot:,.2f}"),
-        ("Entry zone", f"₹{sig.entry_low:,.0f} – ₹{sig.entry_high:,.0f}"),
-        ("Stop loss", f"₹{sig.stop_loss:,.0f}"),
-        ("Target 1", f"₹{sig.target1:,.0f}"),
-        ("Target 2", f"₹{sig.target2:,.0f}"),
-        ("R : R", f'<span class="{rr_col}">1 : {sig.rr}</span>'),
-        ("Capital risk", "0.5 – 1% of capital"),
-        ("Options play", opts_play),
-        ("Trail SL", "Breakeven after T1 hit"),
-        ("India VIX", f"{sig.vix:.2f} ({'use spreads' if sig.vix > 18 else 'OK for naked'})"),
+        ("Direction",    direction_icon(sig.direction)),
+        ("Spot",         f"₹{spot:,.2f}"),
+        ("Entry zone",   f"₹{sig.entry_low:,.0f} – ₹{sig.entry_high:,.0f}"),
+        ("Stop loss",    f"₹{sig.stop_loss:,.0f}"),
+        ("Target 1",     f"₹{sig.target1:,.0f}"),
+        ("Target 2",     f"₹{sig.target2:,.0f}"),
+        ("R : R",        f'<span style="color:{rr_col}">1 : {sig.rr}</span>'),
+        ("Risk",         "0.5 – 1% of capital"),
+        ("Options play", op),
+        ("Trail SL",     "Breakeven after T1"),
+        ("India VIX",    f"{sig.vix:.2f} ({'use spreads' if sig.vix>18 else 'OK naked'})"),
     ]
-
-    html = '<div class="trade-card">'
+    html = '<div class="tcard">'
     for k, v in rows:
-        html += (f'<div class="trow">'
-                 f'<span class="tkey">{k}</span>'
-                 f'<span class="tval">{v}</span>'
-                 f'</div>')
+        html += f'<div class="trow"><span class="tkey">{k}</span><span class="tval">{v}</span></div>'
     html += "</div>"
     st.markdown(html, unsafe_allow_html=True)
 
@@ -588,67 +889,53 @@ def render_signal_column(sig, col):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ── Row 10: 22-Technique table
+# Row 10 — 22-Technique SORTABLE table
 # ─────────────────────────────────────────────────────────────────────────────
 
 TECHNIQUE_META = [
-    ("BOS / CHOCH", "Structure break or change of character"),
+    ("BOS / CHOCH",              "Structure break or change of character"),
     ("HTF Trend (EMA-50 wkly)", "Higher timeframe trend alignment"),
-    ("Key S/R (Pivot)", "Classic pivot support / resistance"),
+    ("Key S/R (Pivot)",          "Classic pivot support / resistance"),
     ("Dynamic S/R (EMA 20/50)", "Price vs EMA20 and EMA50 stack"),
-    ("Trendlines", "Linear regression channel direction"),
-    ("Gann Angles (1×1)", "Price vs 45° Gann from 52-week low"),
-    ("Fibonacci 0.618–0.786", "Retracement hold or rejection"),
+    ("Trendlines",               "Linear regression channel direction"),
+    ("Gann Angles (1×1)",        "Price vs 45° Gann from 52-week low"),
+    ("Fibonacci 0.618–0.786",    "Retracement hold or rejection"),
     ("Harmonic Patterns (PRZ)", "AB=CD / Gartley potential reversal zone"),
-    ("Elliott Wave proxy", "RSI + momentum wave continuation"),
-    ("Supply & Demand zones", "High-volume absorption / rejection"),
-    ("Fair Value Gap (FVG)", "3-bar imbalance fill direction"),
-    ("Breakouts / Breakdowns", "Range expansion with volume confirmation"),
-    ("Momentum — MACD", "MACD crossover and histogram direction"),
+    ("Elliott Wave proxy",       "RSI + momentum wave continuation"),
+    ("Supply & Demand zones",    "High-volume absorption / rejection"),
+    ("Fair Value Gap (FVG)",     "3-bar imbalance fill direction"),
+    ("Breakouts / Breakdowns",   "Range expansion with volume confirmation"),
+    ("Momentum — MACD",          "MACD crossover and histogram direction"),
     ("Oscillators (RSI+Stoch)", "RSI and Stochastic extremes"),
-    ("Divergence (RSI)", "Price vs RSI divergence confirmation"),
-    ("Reversal signals", "Candle reversal at key S/R level"),
-    ("Candlestick patterns", "Engulfing / hammer / shooting star"),
-    ("Heikin Ashi", "HA candle colour and shadow structure"),
-    ("Renko proxy (ATR box)", "ATR-box directional flip"),
-    ("Volume pressure", "Volume spike on up/down bar"),
-    ("OBV trend", "OBV vs its 20-day MA"),
-    ("India VIX filter", "VIX risk-on / risk-off regime"),
+    ("Divergence (RSI)",         "Price vs RSI divergence confirmation"),
+    ("Reversal signals",         "Candle reversal at key S/R level"),
+    ("Candlestick patterns",     "Engulfing / hammer / shooting star"),
+    ("Heikin Ashi",              "HA candle colour and shadow structure"),
+    ("Renko proxy (ATR box)",    "ATR-box directional flip"),
+    ("Volume pressure",          "Volume spike on up/down bar"),
+    ("OBV trend",                "OBV vs its 20-day MA"),
+    ("India VIX filter",         "VIX risk-on / risk-off regime"),
 ]
-
-# Keyword map for matching tech_notes → technique index
 _KW = {
-    0: ["BOS"],
-    1: ["HTF trend"],
-    2: ["S1", "R1", "Pivot", "pivot"],
-    3: ["EMA20", "EMA50", "above EMA", "below EMA"],
-    4: ["trendline", "regression"],
-    5: ["Gann"],
-    6: ["Fib", "0.618", "0.786", "fibonacci", "Fibonacci"],
-    7: ["harmonic", "PRZ"],
-    8: ["EW proxy", "Elliott"],
-    9: ["Demand zone", "Supply zone", "high-volume bullish", "high-volume bearish"],
-    10: ["FVG", "gap between bars"],
-    11: ["Breakout", "Breakdown", "breakout", "breakdown"],
-    12: ["MACD"],
-    13: ["RSI=", "Stoch", "oversold", "overbought"],
-    14: ["divergence", "Divergence"],
-    15: ["reversal candle", "Reversal"],
-    16: ["engulfing", "Hammer", "hammer", "shooting star", "pin bar"],
-    17: ["Heikin Ashi"],
-    18: ["Renko", "Renko proxy"],
-    19: ["Volume spike", "volume spike"],
-    20: ["OBV"],
-    21: ["VIX"],
+    0:["BOS"], 1:["HTF trend"], 2:["S1","R1","Pivot","pivot"],
+    3:["EMA20","EMA50","above EMA","below EMA"], 4:["trendline","regression"],
+    5:["Gann"], 6:["Fib","0.618","0.786","fibonacci","Fibonacci"],
+    7:["harmonic","PRZ"], 8:["EW proxy","Elliott"],
+    9:["Demand zone","Supply zone","high-volume bullish","high-volume bearish"],
+    10:["FVG","gap between bars"],
+    11:["Breakout","Breakdown","breakout","breakdown"],
+    12:["MACD"], 13:["RSI=","Stoch","oversold","overbought"],
+    14:["divergence","Divergence"], 15:["reversal candle","Reversal"],
+    16:["engulfing","Hammer","hammer","shooting star","pin bar"],
+    17:["Heikin Ashi"], 18:["Renko"], 19:["Volume spike","volume spike"],
+    20:["OBV"], 21:["VIX"],
 }
-
-_BULL_KW = ["bullish", "Bullish", "above", "support", "hold", "rising", "oversold", "green",
-            "demand", "Demand", "buy", "bounce", "up", "positive", "low vol", "engulf", "Hammer",
-            "BOS up", "HTF trend: weekly price above"]
-_BEAR_KW = ["bearish", "Bearish", "below", "resistance", "rejection", "falling", "overbought",
-            "red", "supply", "Supply", "sell", "star", "down", "negative", "high vol", "BOS down",
-            "HTF trend: weekly price below"]
-
+_BULL_KW = ["bullish","Bullish","above","support","hold","rising","oversold",
+            "demand","Demand","buy","bounce","up","positive","low vol","engulf",
+            "Hammer","BOS up","HTF trend: weekly price above","green"]
+_BEAR_KW = ["bearish","Bearish","below","resistance","rejection","falling","overbought",
+            "supply","Supply","sell","star","down","negative","high vol","BOS down",
+            "HTF trend: weekly price below","red"]
 
 def _classify(note):
     if any(w in note for w in _BULL_KW): return "bull"
@@ -657,64 +944,60 @@ def _classify(note):
 
 
 def render_tech_table(sig):
-    note_map: dict[int, str] = {}
+    note_map: dict[int,str] = {}
     for note in sig.tech_notes:
         for idx, kws in _KW.items():
             if any(kw in note for kw in kws):
-                if idx not in note_map:
-                    note_map[idx] = note
+                if idx not in note_map: note_map[idx] = note
                 break
 
-    html = """
-    <div style="overflow-x:auto;">
-    <table class="tech-table">
-      <thead><tr>
-        <th style="width:28px">#</th>
-        <th style="width:160px">Technique</th>
-        <th>Description</th>
-        <th style="width:56px;text-align:center">Signal</th>
-        <th>Analysis note</th>
-        <th style="width:70px;text-align:center">Direction</th>
-      </tr></thead>
-      <tbody>
-    """
+    hdrs = [
+        {"label":"#",          "key":"num",  "align":"center"},
+        {"label":"Technique",  "key":"name", "align":"left"},
+        {"label":"Description","key":"desc", "align":"left"},
+        {"label":"Signal",     "key":"sig",  "align":"center"},
+        {"label":"Direction",  "key":"dirn", "align":"center"},
+        {"label":"Analysis Note","key":"note","align":"left"},
+    ]
 
+    rows = []
     for i, (name, desc) in enumerate(TECHNIQUE_META):
         note = note_map.get(i, "")
         kind = _classify(note) if note else "neutral"
-        icon = "✅" if kind == "bull" else ("🔴" if kind == "bear" else "➖")
-        nc = "#00c853" if kind == "bull" else ("#ef5350" if kind == "bear" else "#555")
-        dirn = ('<span class="green" style="font-size:11px;">▲ BULL</span>' if kind == "bull"
-                else '<span class="red" style="font-size:11px;">▼ BEAR</span>' if kind == "bear"
-        else '<span class="grey" style="font-size:11px;">– –</span>')
-        short = note[:68] + "…" if len(note) > 68 else note
-        html += (
-            f'<tr>'
-            f'<td style="color:#444;font-size:10px;">{i + 1:02d}</td>'
-            f'<td style="font-weight:600;font-size:12px;">{name}</td>'
-            f'<td style="color:#8a8fa8;font-size:11px;">{desc}</td>'
-            f'<td style="text-align:center;font-size:15px;">{icon}</td>'
-            f'<td style="color:{nc};font-size:11px;">{short}</td>'
-            f'<td style="text-align:center;">{dirn}</td>'
-            f'</tr>'
+        icon = ("✅" if kind=="bull" else "🔴" if kind=="bear" else "➖")
+        dirn_html = (
+            f'<span class="bdg bdg-g" style="background:{P["green"]};color:#000;">▲ BULL</span>'
+            if kind=="bull" else
+            f'<span class="bdg bdg-r" style="background:{P["red"]};color:#fff;">▼ BEAR</span>'
+            if kind=="bear" else
+            f'<span class="gry">– –</span>'
         )
+        nc = P["green"] if kind=="bull" else (P["red"] if kind=="bear" else P["text3"])
+        short = note[:65]+"…" if len(note)>65 else note
+        rows.append([
+            f'<span class="gry" style="font-size:10px;">{i+1:02d}</span>',
+            f'<b style="font-size:12px;">{name}</b>',
+            f'<span class="gry" style="font-size:11px;">{desc}</span>',
+            f'<span style="font-size:15px;">{icon}</span>',
+            dirn_html,
+            f'<span style="color:{nc};font-size:11px;">{short}</span>',
+        ])
 
-    html += "</tbody></table></div>"
-
-    bull_count = sum(1 for i in range(22) if _classify(note_map.get(i, "")) == "bull")
-    bear_count = sum(1 for i in range(22) if _classify(note_map.get(i, "")) == "bear")
-    neut_count = 22 - bull_count - bear_count
+    bull_c = sum(1 for i in range(22) if _classify(note_map.get(i,""))=="bull")
+    bear_c = sum(1 for i in range(22) if _classify(note_map.get(i,""))=="bear")
+    neut_c = 22 - bull_c - bear_c
 
     with st.expander(
-            f"📊  22-Technique Breakdown — "
-            f"✅ {bull_count} Bullish  |  🔴 {bear_count} Bearish  |  ➖ {neut_count} Neutral",
-            expanded=True,
+        f"📊  22-Technique Breakdown  —  "
+        f"✅ {bull_c} Bullish  ·  🔴 {bear_c} Bearish  ·  ➖ {neut_c} Neutral  "
+        f"(click column headers to sort)",
+        expanded=True,
     ):
-        st.markdown(html, unsafe_allow_html=True)
+        sortable_table(hdrs, rows, height=520, key="tech22")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ── Row 11: Options panel
+# Row 11 — Options panel  (OI chart + SORTABLE metrics table)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def render_options_panel(opts, spot):
@@ -723,68 +1006,113 @@ def render_options_panel(opts, spot):
 
     with c1:
         if not chain.empty:
-            mask = (chain["strike"] >= spot * 0.92) & (chain["strike"] <= spot * 1.08)
-            df = chain[mask].copy() if mask.any() else chain.copy()
-            fig = go.Figure()
-            fig.add_trace(go.Bar(x=df["strike"], y=df["put_oi"] / 1e5,
-                                 name="Put OI (lakh)", marker_color="#ef5350", opacity=0.85))
-            fig.add_trace(go.Bar(x=df["strike"], y=df["call_oi"] / 1e5,
-                                 name="Call OI (lakh)", marker_color="#26a69a", opacity=0.85))
-            fig.add_vline(x=spot, line_dash="dot", line_color="#ffa726",
+            mask = (chain["strike"]>=spot*0.92) & (chain["strike"]<=spot*1.08)
+            df   = chain[mask].copy() if mask.any() else chain.copy()
+            fig  = go.Figure()
+            fig.add_trace(go.Bar(
+                x=df["strike"], y=df["put_oi"]/1e5, name="Put OI",
+                marker_color=P["red"], opacity=0.85,
+                hovertemplate="Strike %{x:,.0f}<br>Put OI: %{y:.1f}L<extra></extra>",
+            ))
+            fig.add_trace(go.Bar(
+                x=df["strike"], y=df["call_oi"]/1e5, name="Call OI",
+                marker_color=P["green"], opacity=0.85,
+                hovertemplate="Strike %{x:,.0f}<br>Call OI: %{y:.1f}L<extra></extra>",
+            ))
+            fig.add_vline(x=spot, line=dict(color=P["yellow"],width=1.5,dash="dot"),
                           annotation_text=f"Spot {spot:,.0f}",
-                          annotation_font=dict(color="#ffa726", size=11))
-            mp = opts.get("max_pain", 0)
+                          annotation_font=dict(color=P["yellow"],size=11))
+            mp = opts.get("max_pain",0)
             if mp:
-                fig.add_vline(x=mp, line_dash="dash", line_color="#ce93d8",
+                fig.add_vline(x=mp, line=dict(color=P["purple"],width=1.5,dash="dash"),
                               annotation_text=f"MaxPain {mp:,.0f}",
-                              annotation_font=dict(color="#ce93d8", size=11))
+                              annotation_font=dict(color=P["purple"],size=11))
             fig.update_layout(
-                title=dict(text="Options OI by Strike (±8% of spot)", font=dict(size=12)),
-                barmode="group", height=310,
-                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                font_color="white", legend=dict(orientation="h", y=1.1),
-                margin=dict(l=8, r=8, t=40, b=8),
+                title=dict(text="Options OI by Strike (±8% of spot) — click to sort below",
+                           font=dict(size=12, color=P["text"])),
+                barmode="group", height=320,
+                paper_bgcolor=P["chart_bg"], plot_bgcolor=P["chart_bg"],
+                font_color=P["text"],
+                legend=dict(orientation="h", y=1.1, font=dict(size=11)),
+                margin=dict(l=8,r=8,t=42,b=8),
+                xaxis=dict(showgrid=False, color=P["text2"], linecolor=P["border"]),
+                yaxis=dict(showgrid=True, gridcolor=P["chart_grid"],
+                           title="OI (lakh)", color=P["text2"]),
+                hovermode="x unified",
             )
             st.plotly_chart(fig, use_container_width=True)
+
+            # Sortable options chain table
+            if len(df) > 0:
+                hdrs_oc = [
+                    {"label":"Strike",    "key":"strike","align":"right"},
+                    {"label":"Put OI",    "key":"poi",   "align":"right"},
+                    {"label":"Put IV %",  "key":"piv",   "align":"right"},
+                    {"label":"Put LTP",   "key":"pltp",  "align":"right"},
+                    {"label":"Call LTP",  "key":"cltp",  "align":"right"},
+                    {"label":"Call IV %", "key":"civ",   "align":"right"},
+                    {"label":"Call OI",   "key":"coi",   "align":"right"},
+                    {"label":"PCR",       "key":"pcr",   "align":"right"},
+                ]
+                oc_rows = []
+                for _, r in df.iterrows():
+                    pcr_v = (r["put_oi"]/r["call_oi"] if r["call_oi"]>0 else 0)
+                    pcr_c = "grn" if pcr_v>1.2 else ("red" if pcr_v<0.8 else "yel")
+                    near = abs(r["strike"]-spot)/spot < 0.005
+                    bld  = "font-weight:700;" if near else ""
+                    sp   = "background:rgba(255,171,0,0.08);" if near else ""
+                    oc_rows.append([
+                        f'<span style="{bld}{sp}">₹{r["strike"]:,.0f}</span>',
+                        f'{r["put_oi"]/1e5:.2f}L',
+                        f'{r["put_iv"]:.1f}%' if r["put_iv"]>0 else "–",
+                        f'₹{r["put_ltp"]:.2f}' if r["put_ltp"]>0 else "–",
+                        f'₹{r["call_ltp"]:.2f}' if r["call_ltp"]>0 else "–",
+                        f'{r["call_iv"]:.1f}%' if r["call_iv"]>0 else "–",
+                        f'{r["call_oi"]/1e5:.2f}L',
+                        f'<span class="{pcr_c}">{pcr_v:.2f}</span>',
+                    ])
+                with st.expander("📋 Options Chain (sortable — click column headers)", expanded=False):
+                    sortable_table(hdrs_oc, oc_rows, height=320, key="oc")
         else:
             st.info("Options chain unavailable (NSE feed offline).")
 
     with c2:
-        pcr = opts.get("pcr_oi", 1.0)
-        mp = opts.get("max_pain", 0)
-        mp_d = opts.get("max_pain_vs_spot", 0)
-        iv_pct = opts.get("iv_percentile", 50)
-        iv_skw = opts.get("iv_skew", 0)
-        top_c = opts.get("top_call_oi_strike", 0)
-        top_p = opts.get("top_put_oi_strike", 0)
-        bias = opts.get("institutional_bias", "NEUTRAL")
+        pcr    = opts.get("pcr_oi",1.0)
+        mp     = opts.get("max_pain",0)
+        mp_d   = opts.get("max_pain_vs_spot",0)
+        iv_pct = opts.get("iv_percentile",50)
+        iv_skw = opts.get("iv_skew",0)
+        top_c  = opts.get("top_call_oi_strike",0)
+        top_p  = opts.get("top_put_oi_strike",0)
+        bias   = opts.get("institutional_bias","NEUTRAL")
 
-        pcr_c = "green" if pcr > 1.2 else ("red" if pcr < 0.8 else "yellow")
-        pcr_l = "Put-writer floor" if pcr > 1.2 else ("Call-writer ceiling" if pcr < 0.8 else "Neutral")
-        mp_c = "green" if mp_d > 0 else "red"
-        mp_l = "↑ Expiry pull-up" if mp_d > 0 else "↓ Expiry pull-down"
-        iv_c = "green" if iv_pct < 30 else ("red" if iv_pct > 70 else "yellow")
-        iv_l = "Cheap — buy options" if iv_pct < 30 else ("Expensive — spread" if iv_pct > 70 else "Normal")
-        sk_c = "red" if iv_skw > 0 else "green"
-        sk_l = "Put IV > Call IV (hedge)" if iv_skw > 0 else "Call IV > Put IV (fear)"
+        pcr_c = P["green"] if pcr>1.2 else (P["red"] if pcr<0.8 else P["yellow"])
+        pcr_l = "Put-writer floor" if pcr>1.2 else ("Call-writer ceiling" if pcr<0.8 else "Neutral")
+        mp_c  = P["green"] if mp_d>0 else P["red"]
+        mp_l  = "↑ Expiry pull-up" if mp_d>0 else "↓ Expiry pull-down"
+        iv_c  = P["green"] if iv_pct<30 else (P["red"] if iv_pct>70 else P["yellow"])
+        iv_l  = "Cheap — buy outright" if iv_pct<30 else ("Expensive — spread it" if iv_pct>70 else "Normal")
+        sk_c  = P["red"] if iv_skw>0 else P["green"]
+        sk_l  = "Put IV > Call IV (hedge)" if iv_skw>0 else "Call IV > Put IV (fear)"
+        bias_c= P["green"] if bias=="BULLISH" else P["red"]
 
-        rows = [
-            ("PCR (OI)", f'<span class="{pcr_c}">{pcr:.3f}</span>', pcr_l),
-            ("Max Pain", f'<span class="{mp_c}">₹{mp:,.0f}</span>', f'{mp_l} ({mp_d:+,.0f})'),
-            ("IV Percentile", f'<span class="{iv_c}">{iv_pct:.0f}%</span>', iv_l),
-            ("IV Skew (Put–Call)", f'<span class="{sk_c}">{iv_skw:+.2f}</span>', sk_l),
-            ("Top Call OI strike", f"₹{top_c:,.0f}", "Resistance wall"),
-            ("Top Put OI strike", f"₹{top_p:,.0f}", "Support floor"),
-            ("Options bias", f'<span class="{"green" if bias == "BULLISH" else "red"}">{bias}</span>', ""),
+        mrows = [
+            ("PCR (OI)",            f'<span style="color:{pcr_c}">{pcr:.3f}</span>', pcr_l),
+            ("Max Pain",            f'<span style="color:{mp_c}">₹{mp:,.0f}</span>',f'{mp_l} ({mp_d:+,.0f})'),
+            ("IV Percentile",       f'<span style="color:{iv_c}">{iv_pct:.0f}%</span>', iv_l),
+            ("IV Skew (Put–Call)",  f'<span style="color:{sk_c}">{iv_skw:+.2f}</span>', sk_l),
+            ("Top Call OI strike",  f"₹{top_c:,.0f}", "Resistance wall"),
+            ("Top Put OI strike",   f"₹{top_p:,.0f}", "Support floor"),
+            ("Options bias",        f'<span style="color:{bias_c}">{bias}</span>', ""),
         ]
-        html = '<div class="metric-tile">'
-        for lbl, val, sub in rows:
+        html = f'<div class="tile">'
+        for lbl, val, sub in mrows:
             html += (
                 f'<div class="opt-row">'
-                f'<span style="color:#8a8fa8;font-size:12px;">{lbl}</span>'
+                f'<span style="color:{P["text2"]};font-size:12px;">{lbl}</span>'
                 f'<div style="text-align:right;">'
                 f'<div style="font-size:13px;font-weight:700;">{val}</div>'
-                f'{"<div style=\'font-size:10px;color:#555;\'>" + sub + "</div>" if sub else ""}'
+                f'{"<div style=\'font-size:10px;color:"+P["text3"]+";\'>"+sub+"</div>" if sub else ""}'
                 f'</div></div>'
             )
         html += "</div>"
@@ -792,28 +1120,43 @@ def render_options_panel(opts, spot):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ── Row 12: VIX trend
+# Row 12 — VIX trend (TradingView style)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def render_vix_chart():
     try:
-        df = get_ohlcv_cached("^INDIAVIX", "3mo", "1d")
+        df = get_ohlcv_cached("^INDIAVIX","3mo","1d")
+        last_vix = float(df["close"].iloc[-1])
+        vc = P["green"] if last_vix<14 else (P["yellow"] if last_vix<20 else P["red"])
         fig = go.Figure()
         fig.add_trace(go.Scatter(
             x=df.index, y=df["close"],
-            fill="tozeroy", fillcolor="rgba(255,171,0,0.08)",
-            line=dict(color="#ffa726", width=1.8), mode="lines", name="India VIX",
+            fill="tozeroy", fillcolor=f"rgba(255,171,0,0.07)",
+            line=dict(color=P["orange"],width=1.8), mode="lines", name="VIX",
+            hovertemplate="VIX: %{y:.2f}<extra></extra>",
         ))
-        for lvl, col, lbl in [(14, "#26a69a", "Risk-on < 14"), (20, "#ef5350", "Danger > 20")]:
-            fig.add_hline(y=lvl, line_dash="dot", line_color=col,
-                          annotation_text=lbl, annotation_font=dict(color=col, size=10))
+        for lvl, col, lbl in [(14,P["green"],"Risk-on < 14"),(20,P["red"],"Danger > 20")]:
+            fig.add_hline(y=lvl, line=dict(color=col,width=0.8,dash="dot"),
+                          annotation_text=lbl,
+                          annotation_font=dict(color=col,size=10),
+                          annotation_position="right")
         fig.update_layout(
-            title=dict(text="India VIX — 3 Month Trend", font=dict(size=12)),
-            height=200, margin=dict(l=8, r=8, t=38, b=8),
-            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-            font_color="white",
-            xaxis=dict(showgrid=False),
-            yaxis=dict(showgrid=True, gridcolor="#1e2130"),
+            title=dict(
+                text=f'India VIX  <span style="color:{vc};font-size:14px;">{last_vix:.2f}</span>  '
+                     f'<span style="font-size:11px;color:{P["text2"]};">3-Month Trend</span>',
+                font=dict(size=13, color=P["text"]),
+            ),
+            height=210, margin=dict(l=8,r=60,t=42,b=8),
+            paper_bgcolor=P["chart_bg"], plot_bgcolor=P["chart_bg"],
+            font_color=P["text"],
+            xaxis=dict(showgrid=False, color=P["text2"], linecolor=P["border"],
+                       showspikes=True, spikecolor=P["chart_cross"],
+                       spikethickness=1, spikedash="dot"),
+            yaxis=dict(showgrid=True, gridcolor=P["chart_grid"],
+                       color=P["text2"], linecolor=P["border"]),
+            hovermode="x unified",
+            hoverlabel=dict(bgcolor=P["bg2"], bordercolor=P["border"],
+                            font=dict(color=P["text"],size=11)),
         )
         st.plotly_chart(fig, use_container_width=True)
     except Exception:
@@ -827,79 +1170,73 @@ def render_vix_chart():
 def main():
     ticker = SYMBOLS.get(symbol.upper(), symbol)
 
-    with st.spinner("Fetching data & computing signals…"):
+    with st.spinner("Fetching live data & computing signals…"):
         fiidii = get_fiidii()
-        opts = get_options(symbol)
-        vix = get_vix()
+        opts   = get_options(symbol)
+        vix    = get_vix()
         result = get_signal(symbol, direction)
 
     if isinstance(result, tuple):
         sig_l, sig_s = result
-        spot = sig_l.spot
+        spot    = sig_l.spot
         primary = sig_l if sig_l.confidence >= sig_s.confidence else sig_s
     else:
         sig_l = sig_s = result
-        spot = result.spot
+        spot    = result.spot
         primary = result
 
-    # ── Row 1: header ────────────────────────────────────────────────────────
+    # ── Rows 1–3: header · tiles · index strip ───────────────────────────────
     render_header(fiidii)
-
-    # ── Row 2: FII/DII tiles ─────────────────────────────────────────────────
     render_fiidii_tiles(fiidii)
-
-    # ── Row 3: index strip ───────────────────────────────────────────────────
     render_index_strip(vix)
 
-    # ── Row 4: intraday charts ───────────────────────────────────────────────
-    st.markdown('<div class="section-hdr">Intraday Institutional Flow</div>', unsafe_allow_html=True)
+    # ── Row 4: intraday flow charts ───────────────────────────────────────────
+    shdr("Intraday Institutional Flow")
     render_intraday_charts(fiidii)
 
-    # ── Row 5: activity breakdown ─────────────────────────────────────────────
+    # ── Row 5: activity breakdown (sortable) ──────────────────────────────────
     render_activity_breakdown(fiidii)
 
-    # ── Row 6: sector flow ───────────────────────────────────────────────────
-    st.markdown('<div class="section-hdr">Sector-wise FII Flow</div>', unsafe_allow_html=True)
+    # ── Row 6: sector flow ────────────────────────────────────────────────────
+    shdr("Sector-wise FII Flow")
     render_sector_flow(fiidii)
 
-    # ── Row 7: institutional banner ───────────────────────────────────────────
+    # ── Row 7: signal banner ──────────────────────────────────────────────────
     render_inst_banner(fiidii)
-
     st.markdown("---")
 
-    # ── Row 8: price chart ───────────────────────────────────────────────────
-    st.markdown('<div class="section-hdr">Price Chart — Technical Overview</div>', unsafe_allow_html=True)
+    # ── Row 8: TradingView chart ──────────────────────────────────────────────
+    shdr("Price Chart — TradingView Style")
     render_price_chart(ticker, symbol, timeframe)
 
     # ── Row 9: signal cards ───────────────────────────────────────────────────
-    st.markdown('<div class="section-hdr">Confluence Signals & Trade Plans</div>', unsafe_allow_html=True)
+    shdr("Confluence Signals & Trade Plans")
     if isinstance(result, tuple):
         c1, c2 = st.columns(2)
         render_signal_column(sig_l, c1)
         render_signal_column(sig_s, c2)
     else:
-        c1, _ = st.columns([1, 1])
+        c1, _ = st.columns([1,1])
         render_signal_column(result, c1)
 
-    # ── Row 10: 22-technique table ────────────────────────────────────────────
-    st.markdown('<div class="section-hdr">22-Technique Breakdown</div>', unsafe_allow_html=True)
+    # ── Row 10: 22-technique sortable table ───────────────────────────────────
+    shdr("22-Technique Breakdown")
     render_tech_table(primary)
 
     # ── Row 11: options ───────────────────────────────────────────────────────
-    st.markdown('<div class="section-hdr">Options Flow Analysis</div>', unsafe_allow_html=True)
+    shdr("Options Flow Analysis")
     render_options_panel(opts, spot)
 
-    # ── Row 12: VIX trend ─────────────────────────────────────────────────────
-    st.markdown('<div class="section-hdr">India VIX Trend</div>', unsafe_allow_html=True)
+    # ── Row 12: VIX ───────────────────────────────────────────────────────────
+    shdr("India VIX Trend")
     render_vix_chart()
 
     # ── Footer ────────────────────────────────────────────────────────────────
+    now_str = datetime.datetime.now().strftime("%d %b %Y %H:%M:%S IST")
     st.markdown(
-        f'<div style="text-align:center;color:#333;font-size:11px;padding:24px 0 8px;">'
-        f'Last updated · {datetime.datetime.now().strftime("%d %b %Y %H:%M:%S IST")} '
-        f'· Data: yfinance · NSE India · Educational purposes only'
-        f'</div>',
-        unsafe_allow_html=True)
+        f'<div style="text-align:center;color:{P["text3"]};font-size:11px;padding:24px 0 8px;">'
+        f'Last updated · {now_str} · yfinance · NSE India · Educational purposes only'
+        f'</div>', unsafe_allow_html=True)
 
     # ── Auto-refresh ──────────────────────────────────────────────────────────
     if refresh > 0:
